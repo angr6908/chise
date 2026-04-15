@@ -81,8 +81,8 @@ install_packages() {
     }
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get update -q
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get install -y \
-        iproute2 fuse3 ca-certificates btrfs-progs nano curl \
-        linux-image-cloud-amd64 openssh-server zip unzip rsync 7zip cron zram-tools iputils-ping \
+        iproute2 ca-certificates btrfs-progs nano curl \
+        linux-image-cloud-amd64 openssh-server cron zram-tools iputils-ping \
         $( [ "$USE_UEFI" = "1" ] \
             && echo "grub-efi-amd64-signed shim-signed efibootmgr" \
             || echo "grub-pc" )
