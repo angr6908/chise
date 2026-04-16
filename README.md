@@ -1,6 +1,6 @@
 # chise.sh
 
-Minimal Debian 13 (Trixie) Btrfs installation script — ~150 MB after install.
+Debian 13 (Trixie) minimal Btrfs install script (~150 MB after install).
 
 ## Key Features
 
