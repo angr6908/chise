@@ -1,6 +1,6 @@
 # chise.sh
 
-A minimalist Debian installation script. Uses only ~150 MB of disk space on Debian 13 (Trixie, latest).
+A minimalist Debian installation script. Uses only ~150 MB of disk space on Debian 13 (Trixie, latest, btrfs).
 
 ## Key Features
 
