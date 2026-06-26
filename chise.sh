@@ -32,7 +32,7 @@ partition_and_mount() {
             mkpart ESP fat16 1MiB 9MiB set 1 esp on \
             mkpart primary btrfs 9MiB 100%
         settle
-        mkfs.fat $PART_EFI
+        mkfs.fat -n ESP $PART_EFI
         mkfs.btrfs -f -L root -M $PART_ROOT
         settle
         mount -o compress=zstd,noatime,space_cache=v2,discard=async $PART_ROOT /mnt
@@ -93,27 +93,15 @@ install_packages() {
 }
 
 configure_system() {
-    settle
-    ROOT_UUID=$(blkid -p -s UUID -o value $PART_ROOT 2>/dev/null)
-    [ -z "$ROOT_UUID" ] && ROOT_UUID=$(blkid -s UUID -o value $PART_ROOT 2>/dev/null)
-    if [ -z "$ROOT_UUID" ]; then
-        echo "FATAL: could not read root UUID from $PART_ROOT; refusing to write a broken fstab" >&2
-        umount -R /mnt 2>/dev/null || true
-        exit 1
-    fi
+    # Mount by LABEL (set via mkfs -L root / -n ESP). The build-time blkid in
+    # some rescue images (busybox) can't emit UUIDs; LABELs are resolved at boot
+    # by the installed system's initramfs, so they're the robust choice here.
     if [ "$USE_UEFI" = "1" ]; then
-        EFI_UUID=$(blkid -p -s UUID -o value $PART_EFI 2>/dev/null)
-        [ -z "$EFI_UUID" ] && EFI_UUID=$(blkid -s UUID -o value $PART_EFI 2>/dev/null)
-        if [ -z "$EFI_UUID" ]; then
-            echo "FATAL: could not read EFI UUID from $PART_EFI" >&2
-            umount -R /mnt 2>/dev/null || true
-            exit 1
-        fi
-        printf "UUID=%s\t/\t\tbtrfs\tdefaults,noatime,compress=zstd,space_cache=v2,discard=async\t0 0\nUUID=%s\t/boot/efi\tvfat\tdefaults,noatime\t0 2\n" \
-            "$ROOT_UUID" "$EFI_UUID" > /mnt/etc/fstab
+        printf "LABEL=root\t/\t\tbtrfs\tdefaults,noatime,compress=zstd,space_cache=v2,discard=async\t0 0\nLABEL=ESP\t/boot/efi\tvfat\tdefaults,noatime\t0 2\n" \
+            > /mnt/etc/fstab
     else
-        printf "UUID=%s\t/\tbtrfs\tdefaults,noatime,compress=zstd,space_cache=v2,discard=async\t0 0\n" \
-            "$ROOT_UUID" > /mnt/etc/fstab
+        printf "LABEL=root\t/\tbtrfs\tdefaults,noatime,compress=zstd,space_cache=v2,discard=async\t0 0\n" \
+            > /mnt/etc/fstab
     fi
 
     printf "nameserver 9.9.9.9\nnameserver 2620:fe::fe\n" > /mnt/etc/resolv.conf
