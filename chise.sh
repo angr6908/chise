@@ -23,21 +23,25 @@ detect_network() {
     GW6=$(ip -6 route show default | awk '{print $3}')
 }
 
+settle() { udevadm settle 2>/dev/null || partprobe $DISK 2>/dev/null || true; }
+
 partition_and_mount() {
     wipefs -a $DISK
     if [ "$USE_UEFI" = "1" ]; then
         parted -s $DISK mklabel gpt \
             mkpart ESP fat16 1MiB 9MiB set 1 esp on \
             mkpart primary btrfs 9MiB 100%
-        sleep 2
+        settle
         mkfs.fat $PART_EFI
         mkfs.btrfs -f -L root -M $PART_ROOT
+        settle
         mount -o compress=zstd,noatime,space_cache=v2,discard=async $PART_ROOT /mnt
         mkdir -p /mnt/boot/efi && mount $PART_EFI /mnt/boot/efi
     else
         parted -s $DISK mklabel msdos mkpart primary btrfs 1MiB 100% set 1 boot on
-        sleep 2
+        settle
         mkfs.btrfs -f -L root -M $PART_ROOT
+        settle
         mount -o compress=zstd,noatime,space_cache=v2,discard=async $PART_ROOT /mnt
     fi
 }
@@ -89,9 +93,22 @@ install_packages() {
 }
 
 configure_system() {
-    ROOT_UUID=$(blkid -s UUID -o value $PART_ROOT)
+    settle
+    ROOT_UUID=$(blkid -p -s UUID -o value $PART_ROOT 2>/dev/null)
+    [ -z "$ROOT_UUID" ] && ROOT_UUID=$(blkid -s UUID -o value $PART_ROOT 2>/dev/null)
+    if [ -z "$ROOT_UUID" ]; then
+        echo "FATAL: could not read root UUID from $PART_ROOT; refusing to write a broken fstab" >&2
+        umount -R /mnt 2>/dev/null || true
+        exit 1
+    fi
     if [ "$USE_UEFI" = "1" ]; then
-        EFI_UUID=$(blkid -s UUID -o value $PART_EFI)
+        EFI_UUID=$(blkid -p -s UUID -o value $PART_EFI 2>/dev/null)
+        [ -z "$EFI_UUID" ] && EFI_UUID=$(blkid -s UUID -o value $PART_EFI 2>/dev/null)
+        if [ -z "$EFI_UUID" ]; then
+            echo "FATAL: could not read EFI UUID from $PART_EFI" >&2
+            umount -R /mnt 2>/dev/null || true
+            exit 1
+        fi
         printf "UUID=%s\t/\t\tbtrfs\tdefaults,noatime,compress=zstd,space_cache=v2,discard=async\t0 0\nUUID=%s\t/boot/efi\tvfat\tdefaults,noatime\t0 2\n" \
             "$ROOT_UUID" "$EFI_UUID" > /mnt/etc/fstab
     else
