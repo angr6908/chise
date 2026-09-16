@@ -128,7 +128,7 @@ install_packages() {
     fi
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get update -q
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get install -y \
-        iproute2 ca-certificates e2fsprogs nano curl \
+        iproute2 ca-certificates e2fsprogs nano curl nftables sudo \
         linux-image-cloud-amd64 openssh-server cron zram-tools iputils-ping \
         $GRUB_PKGS
 }
