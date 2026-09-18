@@ -3,7 +3,6 @@ set -eu
 
 SUITE=trixie
 MIRROR=http://deb.debian.org/debian
-MOUNT_OPTS=compress=zstd,noatime,space_cache=v2,discard=async
 
 if [ "${1:-}" = "--ssh-key" ] && [ -n "${2:-}" ]; then
     SSH_KEY=$2
@@ -14,21 +13,37 @@ fi
 
 [ -d /sys/firmware/efi/efivars ] && USE_UEFI=1 || USE_UEFI=0
 
+printf "Filesystem: 1) Btrfs  2) ext4 [1/2]: "
+read -r FS_MODE
+if [ "$FS_MODE" = "2" ]; then
+    FSTYPE=ext4
+    MOUNT_OPTS=noatime,errors=remount-ro
+    FSCK_PASS=1
+    HOST_FS_PKGS=e2fsprogs
+    TARGET_FS_PKGS=e2fsprogs
+else
+    FSTYPE=btrfs
+    MOUNT_OPTS=compress=zstd,noatime,space_cache=v2,discard=async
+    FSCK_PASS=0
+    HOST_FS_PKGS=btrfs-progs
+    TARGET_FS_PKGS=btrfs-progs
+fi
+
 printf "Network: 1) DHCP  2) Static [1/2]: "
 read -r NET_MODE
 [ "$NET_MODE" = "2" ] && USE_STATIC=1 || USE_STATIC=0
 
 prepare_host() {
-    modprobe btrfs 2>/dev/null || true
+    [ "$FSTYPE" = btrfs ] && modprobe btrfs 2>/dev/null || true
     . /etc/os-release 2>/dev/null || true
     case "${ID:-}" in
         alpine)
-            apk add --no-cache util-linux debootstrap btrfs-progs parted \
+            apk add --no-cache util-linux debootstrap $HOST_FS_PKGS parted \
                 e2fsprogs-extra zstd dosfstools ;;
         debian|ubuntu)
             apt-get update -q
             DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                util-linux debootstrap btrfs-progs parted e2fsprogs zstd dosfstools ;;
+                util-linux debootstrap $HOST_FS_PKGS parted e2fsprogs zstd dosfstools ;;
         *)
             echo "Unsupported host OS: ${ID:-unknown}" >&2; exit 1 ;;
     esac
@@ -60,21 +75,25 @@ detect_network() {
 settle() { udevadm settle 2>/dev/null || partprobe "$DISK" 2>/dev/null || true; }
 
 make_root_fs() {
-    mkfs.btrfs -f -L root -M "$PART_ROOT"
-    btrfs device scan --forget 2>/dev/null || true
-    btrfs device scan 2>/dev/null || true
+    if [ "$FSTYPE" = btrfs ]; then
+        mkfs.btrfs -f -L root -M "$PART_ROOT"
+        btrfs device scan --forget 2>/dev/null || true
+        btrfs device scan 2>/dev/null || true
+    else
+        mkfs.ext4 -F -m 0 -i 8192 -L root "$PART_ROOT"
+    fi
     settle
 }
 
 partition_and_mount() {
     wipefs -a "$DISK" 2>/dev/null || true
-    btrfs device scan --forget 2>/dev/null || true
+    [ "$FSTYPE" = btrfs ] && btrfs device scan --forget 2>/dev/null || true
     dd if=/dev/zero of="$DISK" bs=1M count=300 conv=fsync 2>/dev/null || true
 
     if [ "$USE_UEFI" = 1 ]; then
         parted -s "$DISK" mklabel gpt \
             mkpart ESP fat16 1MiB 9MiB set 1 esp on \
-            mkpart primary btrfs 9MiB 100%
+            mkpart primary "$FSTYPE" 9MiB 100%
         settle
         mkfs.fat -n ESP "$PART_EFI"
         make_root_fs
@@ -82,7 +101,7 @@ partition_and_mount() {
         mkdir -p /mnt/boot/efi
         mount "$PART_EFI" /mnt/boot/efi
     else
-        parted -s "$DISK" mklabel msdos mkpart primary btrfs 1MiB 100% set 1 boot on
+        parted -s "$DISK" mklabel msdos mkpart primary "$FSTYPE" 1MiB 100% set 1 boot on
         settle
         make_root_fs
         mount -o "$MOUNT_OPTS" "$PART_ROOT" /mnt
@@ -132,18 +151,34 @@ install_packages() {
     fi
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get update -q
     DEBIAN_FRONTEND=noninteractive chroot /mnt apt-get install -y \
-        iproute2 ca-certificates btrfs-progs nano curl \
+        iproute2 ca-certificates $TARGET_FS_PKGS nano curl nftables sudo \
         linux-image-cloud-amd64 openssh-server cron zram-tools iputils-ping \
-        $GRUB_PKGS
+        fuse3 zip unzip rsync 7zip systemd-timesyncd $GRUB_PKGS
+}
+
+# UUID is unique; -p skips a stale cache, LABEL covers busybox blkid.
+fs_spec() {
+    _dev=$1
+    _label=$2
+    _uuid=$(blkid -p -s UUID -o value "$_dev" 2>/dev/null || true)
+    [ -n "$_uuid" ] || _uuid=$(blkid -s UUID -o value "$_dev" 2>/dev/null || true)
+    if [ -n "$_uuid" ]; then
+        printf "UUID=%s" "$_uuid"
+    else
+        echo "Note: no UUID for $_dev, using LABEL=$_label in fstab" >&2
+        printf "LABEL=%s" "$_label"
+    fi
 }
 
 configure_system() {
+    ROOT_SPEC=$(fs_spec "$PART_ROOT" root)
     if [ "$USE_UEFI" = 1 ]; then
-        printf "LABEL=root\t/\t\tbtrfs\t%s\t0 0\nLABEL=ESP\t/boot/efi\tvfat\tdefaults,noatime\t0 2\n" \
-            "$MOUNT_OPTS" > /mnt/etc/fstab
+        EFI_SPEC=$(fs_spec "$PART_EFI" ESP)
+        printf "%s\t/\t\t%s\t%s\t0 %s\n%s\t/boot/efi\tvfat\tdefaults,noatime\t0 2\n" \
+            "$ROOT_SPEC" "$FSTYPE" "$MOUNT_OPTS" "$FSCK_PASS" "$EFI_SPEC" > /mnt/etc/fstab
     else
-        printf "LABEL=root\t/\tbtrfs\t%s\t0 0\n" \
-            "$MOUNT_OPTS" > /mnt/etc/fstab
+        printf "%s\t/\t%s\t%s\t0 %s\n" \
+            "$ROOT_SPEC" "$FSTYPE" "$MOUNT_OPTS" "$FSCK_PASS" > /mnt/etc/fstab
     fi
 
     printf "nameserver 9.9.9.9\nnameserver 2620:fe::fe\n" > /mnt/etc/resolv.conf
@@ -162,6 +197,8 @@ vm.extfrag_threshold=0
 EOF
     printf "[Journal]\nSystemMaxUse=1M\nRuntimeMaxUse=1M\n" \
         > /mnt/etc/systemd/journald.conf.d/size.conf
+
+    [ "$FSTYPE" = ext4 ] && chroot /mnt systemctl enable fstrim.timer || true
 }
 
 configure_ssh() {
@@ -174,6 +211,14 @@ PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
+EOF
+    mkdir -p /mnt/etc/ssh/ssh_config.d/
+    cat > /mnt/etc/ssh/ssh_config.d/99-local.conf << 'EOF'
+Host *
+    User root
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
 EOF
 }
 
@@ -193,6 +238,10 @@ configure_network() {
             > /mnt/etc/systemd/network/20-wired.network
     fi
     chroot /mnt systemctl enable systemd-networkd
+}
+
+configure_time() {
+    chroot /mnt systemctl enable systemd-timesyncd
 }
 
 configure_bootloader() {
@@ -239,6 +288,7 @@ install_packages
 configure_system
 configure_ssh
 configure_network
+configure_time
 configure_bootloader
 configure_zram
 cleanup
